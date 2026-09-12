@@ -40,6 +40,7 @@ import nodomain.freeyourgadget.gadgetbridge.devices.casio.gwb5600.CasioGMWB5000D
 import nodomain.freeyourgadget.gadgetbridge.devices.casio.gwb5600.CasioGWB5600DeviceCoordinator;
 import nodomain.freeyourgadget.gadgetbridge.devices.cmfwatchpro.CmfWatchPro2Coordinator;
 import nodomain.freeyourgadget.gadgetbridge.devices.cmfwatchpro.CmfWatchProCoordinator;
+import nodomain.freeyourgadget.gadgetbridge.devices.colmi.ColmiH59Coordinator;
 import nodomain.freeyourgadget.gadgetbridge.devices.colmi.ColmiR02Coordinator;
 import nodomain.freeyourgadget.gadgetbridge.devices.colmi.ColmiR03Coordinator;
 import nodomain.freeyourgadget.gadgetbridge.devices.colmi.ColmiR06Coordinator;
@@ -573,6 +574,7 @@ public enum DeviceType {
     FEMOMETER_VINCA2(FemometerVinca2DeviceCoordinator.class),
     PIXOO(PixooCoordinator.class),
     HAMA_FIT6900(HamaFit6900DeviceCoordinator.class),
+    COLMI_H59(ColmiH59Coordinator.class),
     COLMI_R02(ColmiR02Coordinator.class),
     COLMI_R03(ColmiR03Coordinator.class),
     COLMI_R06(ColmiR06Coordinator.class),

@@ -59,6 +59,7 @@ import nodomain.freeyourgadget.gadgetbridge.service.btle.profiles.IntentListener
 import nodomain.freeyourgadget.gadgetbridge.service.btle.profiles.deviceinfo.DeviceInfo;
 import nodomain.freeyourgadget.gadgetbridge.service.btle.profiles.deviceinfo.DeviceInfoProfile;
 import nodomain.freeyourgadget.gadgetbridge.service.serial.GBDeviceProtocol;
+import nodomain.freeyourgadget.gadgetbridge.util.CheckSums;
 import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils;
 import nodomain.freeyourgadget.gadgetbridge.util.GB;
 import nodomain.freeyourgadget.gadgetbridge.util.Prefs;
@@ -69,6 +70,7 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     private final Handler backgroundTasksHandler = new Handler(Looper.getMainLooper());
 
     private final DeviceInfoProfile<ColmiR0xDeviceSupport> deviceInfoProfile;
+    private final boolean readOnly;
     private String cachedFirmwareVersion = null;
 
     private int daysAgo;
@@ -79,7 +81,12 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     private ByteBuffer bigDataPacket;
 
     public ColmiR0xDeviceSupport() {
+        this(false);
+    }
+
+    protected ColmiR0xDeviceSupport(boolean readOnly) {
         super(LOG);
+        this.readOnly = readOnly;
         addSupportedService(ColmiR0xConstants.CHARACTERISTIC_SERVICE_V1);
         addSupportedService(ColmiR0xConstants.CHARACTERISTIC_SERVICE_V2);
         addSupportedService(GattService.UUID_SERVICE_DEVICE_INFORMATION);
@@ -155,9 +162,11 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     }
 
     private void postConnectInitialization() {
-        setPhoneName();
-        setDateTime();
-        setUserPreferences();
+        if (!readOnly) {
+            setPhoneName();
+            setDateTime();
+            setUserPreferences();
+        }
         requestBatteryInfo();
         requestSettingsFromRing();
     }
@@ -475,11 +484,17 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
     @Override
     public void onSetTime() {
+        if (readOnly) {
+            return;
+        }
         setDateTime();
     }
 
     @Override
     public void onSendConfiguration(String config) {
+        if (readOnly) {
+            return;
+        }
         final Prefs prefs = getDevicePrefs();
         switch (config) {
             case SettingsActivity.PREF_MEASUREMENT_SYSTEM:
@@ -508,6 +523,9 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
     @Override
     public void onSetHeartRateMeasurementInterval(int seconds) {
+        if (readOnly) {
+            return;
+        }
         // Round to nearest 5 minutes and limit to 60 minutes due to device constraints
         long hrIntervalMins = Math.min(Math.round(seconds / 60.0 / 5.0) * 5, 60);
         byte[] hrIntervalPacket = buildPacket(new byte[]{
@@ -573,6 +591,9 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
     @Override
     public void onPowerOff() {
+        if (readOnly) {
+            return;
+        }
         byte[] poweroffPacket = buildPacket(new byte[]{ColmiR0xConstants.CMD_POWER_OFF, 0x01});
         LOG.info("Poweroff request sent: {}", StringUtils.bytesToHex(poweroffPacket));
         sendWrite("poweroffRequest", poweroffPacket);
@@ -580,6 +601,9 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
     @Override
     public void onReset(int flags) {
+        if (readOnly) {
+            return;
+        }
         if ((flags & GBDeviceProtocol.RESET_FLAGS_FACTORY_RESET) != 0) {
             byte[] resetPacket = buildPacket(new byte[]{ColmiR0xConstants.CMD_FACTORY_RESET, 0x66, 0x66});
             LOG.info("Factory reset request sent: {}", StringUtils.bytesToHex(resetPacket));
@@ -589,6 +613,9 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
     @Override
     public void onFindDevice(boolean start) {
+        if (readOnly) {
+            return;
+        }
         if (!start) return;
 
         byte[] findDevicePacket = buildPacket(new byte[]{ColmiR0xConstants.CMD_FIND_DEVICE, 0x55, (byte) 0xAA});
@@ -598,6 +625,9 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
     @Override
     public void onHeartRateTest() {
+        if (readOnly) {
+            return;
+        }
         byte[] measureHeartRatePacket = buildPacket(new byte[]{ColmiR0xConstants.CMD_MANUAL_HEART_RATE, 0x01});
         LOG.info("Measure HR request sent: {}", StringUtils.bytesToHex(measureHeartRatePacket));
         sendWrite("measureHRRequest", measureHeartRatePacket);
@@ -657,7 +687,7 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
         getDevice().setBusyTask(getContext().getString(R.string.busy_task_fetch_stress_data));
         getDevice().sendDeviceUpdateIntent(getContext());
         syncingDay = Calendar.getInstance();
-        byte[] stressHistoryRequest = buildPacket(new byte[]{ColmiR0xConstants.CMD_SYNC_STRESS});
+        byte[] stressHistoryRequest = buildPacket(new byte[]{ColmiR0xConstants.CMD_SYNC_STRESS, (byte) daysAgo});
         LOG.info("Fetch historical stress data request sent: {}", StringUtils.bytesToHex(stressHistoryRequest));
         sendWrite("stressHistoryRequest", stressHistoryRequest);
     }
@@ -665,15 +695,10 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     private void fetchHistorySpo2() {
         getDevice().setBusyTask(getContext().getString(R.string.busy_task_fetch_spo2_data));
         getDevice().sendDeviceUpdateIntent(getContext());
-        byte[] spo2HistoryRequest = new byte[]{
-                ColmiR0xConstants.CMD_BIG_DATA_V2,
+        byte[] spo2HistoryRequest = buildRichDataPacket(
                 ColmiR0xConstants.BIG_DATA_TYPE_SPO2,
-                0x01,
-                0x00,
-                (byte) 0xff,
-                0x00,
-                (byte) 0xff
-        };
+                new byte[]{(byte) 0xff}
+        );
         LOG.info("Fetch historical SpO2 data request sent: {}", StringUtils.bytesToHex(spo2HistoryRequest));
         sendCommand("spo2HistoryRequest", spo2HistoryRequest);
     }
@@ -681,15 +706,10 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     private void fetchHistorySleep() {
         getDevice().setBusyTask(getContext().getString(R.string.busy_task_fetch_sleep_data));
         getDevice().sendDeviceUpdateIntent(getContext());
-        byte[] sleepHistoryRequest = new byte[]{
-                ColmiR0xConstants.CMD_BIG_DATA_V2,
+        byte[] sleepHistoryRequest = buildRichDataPacket(
                 ColmiR0xConstants.BIG_DATA_TYPE_SLEEP,
-                0x01,
-                0x00,
-                (byte) 0xff,
-                0x00,
-                (byte) 0xff
-        };
+                new byte[]{(byte) 0xff, 0x01}
+        );
         LOG.info("Fetch historical sleep data request sent: {}", StringUtils.bytesToHex(sleepHistoryRequest));
         sendCommand("sleepHistoryRequest", sleepHistoryRequest);
     }
@@ -704,12 +724,18 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
         }
         syncingDay.set(Calendar.SECOND, 0);
         syncingDay.set(Calendar.MILLISECOND, 0);
-        ByteBuffer hrvHistoryRequestBB = ByteBuffer.allocate(5);
-        hrvHistoryRequestBB.order(ByteOrder.LITTLE_ENDIAN);
-        hrvHistoryRequestBB.put(0, ColmiR0xConstants.CMD_SYNC_HRV);
-        hrvHistoryRequestBB.putInt(1, daysAgo);
-        byte[] hrvHistoryRequest = buildPacket(hrvHistoryRequestBB.array());
+        byte[] hrvHistoryRequest = buildPacket(new byte[]{ColmiR0xConstants.CMD_SYNC_HRV, (byte) daysAgo});
         LOG.info("Fetch historical HRV data request sent ({}): {}", syncingDay.getTime(), StringUtils.bytesToHex(hrvHistoryRequest));
         sendWrite("hrvHistoryRequest", hrvHistoryRequest);
+    }
+
+    private byte[] buildRichDataPacket(byte action, byte[] payload) {
+        ByteBuffer buffer = ByteBuffer.allocate(payload.length + 6).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.put(ColmiR0xConstants.CMD_BIG_DATA_V2);
+        buffer.put(action);
+        buffer.putShort((short) payload.length);
+        buffer.putShort((short) CheckSums.getCRC16ansi(payload));
+        buffer.put(payload);
+        return buffer.array();
     }
 }
