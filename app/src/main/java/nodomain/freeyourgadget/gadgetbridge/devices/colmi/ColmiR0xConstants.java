@@ -43,9 +43,25 @@ public class ColmiR0xConstants {
     public static final byte CMD_SYNC_ACTIVITY = 0x43;
     public static final byte CMD_FIND_DEVICE = 0x50;
     public static final byte CMD_MANUAL_HEART_RATE = 0x69;
+    public static final byte CMD_PUSH_MESSAGE = 0x72;
     public static final byte CMD_NOTIFICATION = 0x73;
     public static final byte CMD_BIG_DATA_V2 = (byte) 0xbc;
     public static final byte CMD_FACTORY_RESET = (byte) 0xff;
+
+    public static final byte MESSAGE_TYPE_PHONE_RING = 0x00;
+    public static final byte MESSAGE_TYPE_SMS = 0x01;
+    public static final byte MESSAGE_TYPE_QQ = 0x02;
+    public static final byte MESSAGE_TYPE_WECHAT = 0x03;
+    public static final byte MESSAGE_TYPE_PHONE_ACTION = 0x04;
+    public static final byte MESSAGE_TYPE_FACEBOOK = 0x05;
+    public static final byte MESSAGE_TYPE_WHATSAPP = 0x06;
+    public static final byte MESSAGE_TYPE_TWITTER = 0x07;
+    public static final byte MESSAGE_TYPE_SKYPE = 0x08;
+    public static final byte MESSAGE_TYPE_LINE = 0x09;
+    public static final byte MESSAGE_TYPE_LINKEDIN = 0x0a;
+    public static final byte MESSAGE_TYPE_INSTAGRAM = 0x0b;
+    public static final byte MESSAGE_TYPE_SNAPCHAT = 0x0d;
+    public static final byte MESSAGE_TYPE_GENERIC = 0x0e;
 
     public static final byte PREF_READ = 0x01;
     public static final byte PREF_WRITE = 0x02;
