@@ -17,6 +17,7 @@
 package nodomain.freeyourgadget.gadgetbridge.devices.colmi;
 
 import android.content.Context;
+import android.database.Cursor;
 import android.content.Intent;
 import android.widget.Toast;
 
@@ -168,35 +169,57 @@ public class ColmiR0xPacketHandler {
         LOG.info("Received live activity notification: {} steps, {} calories, {}m distance", steps, calories, distance);
     }
 
-    public static void historicalActivity(GBDevice device, Context context, byte[] value) {
-        if ((value[1] & 0xff) == 0xff) {
+    public static void historicalActivity(GBDevice device, Context context, byte[] value, boolean calorieNewProtocol) {
+        if (ColmiR0xActivityPacket.isEmpty(value)) {
             device.unsetBusyTask();
             device.sendDeviceUpdateIntent(context);
             LOG.info("Empty activity history, sync aborted");
-        } else if ((value[1] & 0xff) == 0xf0) {
+        } else if (ColmiR0xActivityPacket.isHeader(value)) {
             // initial packet, doesn't contain anything interesting
         } else {
+            ColmiR0xActivityPacket.ActivitySample activitySample = ColmiR0xActivityPacket.decode(value);
+            if (activitySample == null) {
+                LOG.warn("Ignoring malformed activity history packet");
+                device.unsetBusyTask();
+                device.sendDeviceUpdateIntent(context);
+                return;
+            }
+
             // Unpack timestamp and data
             Calendar sampleCal = Calendar.getInstance();
-            // The code below converts the raw hex value to a date. That seems wrong, but is correct,
-            // because this date is for some reason transmitted as ints used as literal bytes:
-            // A date like 2024-08-18 would be transmitted as 0x24 0x08 0x18.
-            sampleCal.set(Calendar.YEAR, 2000 + Integer.valueOf(String.format("%02x", value[1])));
-            sampleCal.set(Calendar.MONTH, Integer.valueOf(String.format("%02x", value[2])) - 1);
-            sampleCal.set(Calendar.DAY_OF_MONTH, Integer.valueOf(String.format("%02x", value[3])));
-            sampleCal.set(Calendar.HOUR_OF_DAY, value[4] / 4);  // And the hour is transmitted as nth quarter of the day...
-            sampleCal.set(Calendar.MINUTE, 0);
+            sampleCal.clear();
+            sampleCal.setLenient(false);
+            sampleCal.set(
+                    activitySample.getYear(),
+                    activitySample.getMonth() - 1,
+                    activitySample.getDay(),
+                    activitySample.getHour(),
+                    activitySample.getMinute(),
+                    0
+            );
+            try {
+                sampleCal.getTimeInMillis();
+            } catch (IllegalArgumentException e) {
+                LOG.warn("Ignoring activity history packet with invalid date", e);
+                device.unsetBusyTask();
+                device.sendDeviceUpdateIntent(context);
+                return;
+            }
             sampleCal.set(Calendar.SECOND, 0);
             sampleCal.set(Calendar.MILLISECOND, 0);
-            int calories = BLETypeConversions.toUint16(value[7], value[8]);
-            int steps = BLETypeConversions.toUint16(value[9], value[10]);
-            int distance = BLETypeConversions.toUint16(value[11], value[12]);
+            int calories = activitySample.getCalories(calorieNewProtocol);
+            int steps = activitySample.getSteps();
+            int distance = activitySample.getDistance();
             LOG.info("Received activity sample: {} - {} calories, {} steps, {} distance", sampleCal.getTime(), calories, steps, distance);
             // Build sample object and save in database
             try (DBHandler db = GBApplication.acquireDB()) {
                 ColmiActivitySampleProvider sampleProvider = new ColmiActivitySampleProvider(device, db.getDaoSession());
                 Long userId = DBHelper.getUser(db.getDaoSession()).getId();
                 Long deviceId = DBHelper.getDevice(device, db.getDaoSession()).getId();
+                // Real hourly data supersedes a 0x48 fallback aggregate stored at midnight.
+                if (activitySample.getHour() != 0 || activitySample.getMinute() != 0) {
+                    removeDailySummary(db, deviceId, sampleCal);
+                }
                 ColmiActivitySample gbSample = sampleProvider.createActivitySample();
                 gbSample.setProvider(sampleProvider);
                 gbSample.setDeviceId(deviceId);
@@ -211,12 +234,93 @@ public class ColmiR0xPacketHandler {
                 LOG.error("Error acquiring database for recording activity samples", e);
             }
             // Determine if this sync is done
-            int currentActivityPacket = value[5];
-            int totalActivityPackets = value[6];
+            int currentActivityPacket = activitySample.getCurrentPacket();
+            int totalActivityPackets = activitySample.getTotalPackets();
             if (currentActivityPacket == totalActivityPackets - 1) {
                 device.unsetBusyTask();
                 device.sendDeviceUpdateIntent(context);
             }
+        }
+    }
+
+    private static void removeDailySummary(DBHandler db, long deviceId, Calendar sampleCal) {
+        Calendar dayStart = (Calendar) sampleCal.clone();
+        dayStart.set(Calendar.HOUR_OF_DAY, 0);
+        dayStart.set(Calendar.MINUTE, 0);
+        dayStart.set(Calendar.SECOND, 0);
+        dayStart.set(Calendar.MILLISECOND, 0);
+        int timestamp = (int) (dayStart.getTimeInMillis() / 1000);
+
+        int deleted = db.getDatabase().delete(
+                "COLMI_ACTIVITY_SAMPLE",
+                "TIMESTAMP = ? AND DEVICE_ID = ?",
+                new String[]{String.valueOf(timestamp), String.valueOf(deviceId)}
+        );
+        if (deleted > 0) {
+            LOG.info("Removed stale daily activity summary at {}", dayStart.getTime());
+        }
+    }
+
+    public static void historicalTodayActivity(GBDevice device, byte[] value, Calendar sampleDay) {
+        ColmiR0xActivityPacket.TodaySummary summary = ColmiR0xActivityPacket.decodeTodaySummary(value);
+        if (summary == null) {
+            LOG.warn("Ignoring malformed today activity packet: {}", StringUtils.bytesToHex(value));
+            return;
+        }
+
+        if (summary.getSteps() == 0 && summary.getCalories() == 0 && summary.getDistance() == 0) {
+            LOG.info("Received empty today activity summary");
+            return;
+        }
+
+        Calendar sampleCal = sampleDay == null ? Calendar.getInstance() : (Calendar) sampleDay.clone();
+        sampleCal.set(Calendar.HOUR_OF_DAY, 0);
+        sampleCal.set(Calendar.MINUTE, 0);
+        sampleCal.set(Calendar.SECOND, 0);
+        sampleCal.set(Calendar.MILLISECOND, 0);
+        LOG.info(
+                "Received today activity summary: {} calories, {} steps, {} distance",
+                summary.getCalories(),
+                summary.getSteps(),
+                summary.getDistance()
+        );
+
+        try (DBHandler db = GBApplication.acquireDB()) {
+            ColmiActivitySampleProvider sampleProvider = new ColmiActivitySampleProvider(device, db.getDaoSession());
+            Long userId = DBHelper.getUser(db.getDaoSession()).getId();
+            Long deviceId = DBHelper.getDevice(device, db.getDaoSession()).getId();
+            int dayStartTimestamp = (int) (sampleCal.getTimeInMillis() / 1000);
+            Calendar nextDay = (Calendar) sampleCal.clone();
+            nextDay.add(Calendar.DAY_OF_YEAR, 1);
+            int nextDayTimestamp = (int) (nextDay.getTimeInMillis() / 1000);
+            boolean hasHourlySamples;
+            try (Cursor cursor = db.getDatabase().rawQuery(
+                    "SELECT 1 FROM COLMI_ACTIVITY_SAMPLE WHERE DEVICE_ID = ? AND TIMESTAMP > ? AND TIMESTAMP < ? LIMIT 1",
+                    new String[]{
+                            String.valueOf(deviceId),
+                            String.valueOf(dayStartTimestamp),
+                            String.valueOf(nextDayTimestamp)
+                    }
+            )) {
+                hasHourlySamples = cursor.moveToFirst();
+            }
+            if (hasHourlySamples) {
+                removeDailySummary(db, deviceId, sampleCal);
+                LOG.info("Skipping today's activity summary because hourly activity samples already exist");
+                return;
+            }
+            ColmiActivitySample gbSample = sampleProvider.createActivitySample();
+            gbSample.setProvider(sampleProvider);
+            gbSample.setDeviceId(deviceId);
+            gbSample.setUserId(userId);
+            gbSample.setRawKind(ActivityKind.ACTIVITY.getCode());
+            gbSample.setTimestamp(dayStartTimestamp);
+            gbSample.setCalories(summary.getCalories());
+            gbSample.setSteps(summary.getSteps());
+            gbSample.setDistance(summary.getDistance());
+            sampleProvider.addGBActivitySample(gbSample);
+        } catch (Exception e) {
+            LOG.error("Error acquiring database for recording today's activity summary", e);
         }
     }
 

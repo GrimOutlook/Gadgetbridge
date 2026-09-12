@@ -21,6 +21,32 @@ public abstract class AbstractColmiActivitySample extends AbstractActivitySample
 
     abstract public int getCalories();
 
+    abstract public void setCalories(int calories);
+
+    abstract public int getDistance();
+
+    abstract public void setDistance(int distance);
+
+    @Override
+    public int getActiveCalories() {
+        return getCalories();
+    }
+
+    @Override
+    public void setActiveCalories(int activeCalories) {
+        setCalories(activeCalories);
+    }
+
+    @Override
+    public int getDistanceCm() {
+        return getDistance() == NOT_MEASURED ? NOT_MEASURED : getDistance() * 100;
+    }
+
+    @Override
+    public void setDistanceCm(int distanceCm) {
+        setDistance(distanceCm == NOT_MEASURED ? NOT_MEASURED : distanceCm / 100);
+    }
+
     @Override
     public void setRawIntensity(int rawIntensity) {
         this.rawIntensity = rawIntensity;

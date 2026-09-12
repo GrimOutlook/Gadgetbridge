@@ -43,8 +43,11 @@ import nodomain.freeyourgadget.gadgetbridge.database.DBHandler;
 import nodomain.freeyourgadget.gadgetbridge.database.DBHelper;
 import nodomain.freeyourgadget.gadgetbridge.deviceevents.GBDeviceEventBatteryInfo;
 import nodomain.freeyourgadget.gadgetbridge.deviceevents.GBDeviceEventVersionInfo;
+import nodomain.freeyourgadget.gadgetbridge.devices.colmi.ColmiR0xActivityPacket;
 import nodomain.freeyourgadget.gadgetbridge.devices.colmi.ColmiR0xConstants;
+import nodomain.freeyourgadget.gadgetbridge.devices.colmi.ColmiR0xHeartRatePacket;
 import nodomain.freeyourgadget.gadgetbridge.devices.colmi.ColmiR0xPacketHandler;
+import nodomain.freeyourgadget.gadgetbridge.devices.colmi.ColmiR0xTimePacket;
 import nodomain.freeyourgadget.gadgetbridge.devices.colmi.samples.ColmiHeartRateSampleProvider;
 import nodomain.freeyourgadget.gadgetbridge.entities.ColmiHeartRateSample;
 import nodomain.freeyourgadget.gadgetbridge.impl.GBDevice;
@@ -76,6 +79,9 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     private int daysAgo;
     private int packetsTotalNr;
     private Calendar syncingDay;
+    private boolean activityCalorieNewProtocol;
+    private boolean awaitingTodayActivitySummary;
+    private final Runnable todayActivitySummaryTimeout = this::todayActivitySummaryTimedOut;
 
     private int bigDataPacketSize;
     private ByteBuffer bigDataPacket;
@@ -164,7 +170,11 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     private void postConnectInitialization() {
         if (!readOnly) {
             setPhoneName();
+        }
+        if (supportsTimeSync()) {
             setDateTime();
+        }
+        if (!readOnly) {
             setUserPreferences();
         }
         requestBatteryInfo();
@@ -202,49 +212,41 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                     break;
                 case ColmiR0xConstants.CMD_SYNC_HEART_RATE:
                     LOG.info("Received HR history sync packet: {}", StringUtils.bytesToHex(value));
-                    int hrPacketNr = value[1] & 0xff;
-                    if (hrPacketNr == 0xff) {
+                    int hrPacketNr = ColmiR0xHeartRatePacket.getPacketNumber(value);
+                    if (ColmiR0xHeartRatePacket.isEmpty(value)) {
                         LOG.info("Empty HR history, sync aborted");
                         getDevice().unsetBusyTask();
                         getDevice().sendDeviceUpdateIntent(getContext());
-                    } else if (hrPacketNr == 0) {
-                        packetsTotalNr = value[2];
+                    } else if (ColmiR0xHeartRatePacket.isHeader(value)) {
+                        packetsTotalNr = ColmiR0xHeartRatePacket.getTotalPackets(value);
                         LOG.info("HR history packet {} out of total {}", hrPacketNr, packetsTotalNr);
                     } else {
                         LOG.info("HR history packet {} out of total {} (data for {}:00-{}:00)", hrPacketNr, packetsTotalNr, hrPacketNr-1, hrPacketNr);
                         Calendar sampleCal = (Calendar) syncingDay.clone();
-                        int startValue = hrPacketNr == 1 ? 6 : 2;  // packet 1 contains the sync-from timestamp in bytes 2-5
-                        int minutesInPreviousPackets = 0;
                         if (hrPacketNr == 1) {
-                            int timestamp = BLETypeConversions.toUint32(value[2], value[3], value[4], value[5]);
+                            int timestamp = ColmiR0xHeartRatePacket.getSyncTimestamp(value);
                             Date timestampDate = DateTimeUtils.parseTimeStamp(timestamp);
                             LOG.info("Receiving HR history sequence with timestamp {}", DateTimeUtils.formatIso8601UTC(timestampDate));
-                        } else {
-                            minutesInPreviousPackets = 9 * 5;  // packet 1
-                            minutesInPreviousPackets += (hrPacketNr - 2) * 13 * 5;
                         }
-                        for (int i = startValue; i < value.length - 1; i++) {
-                            if (value[i] != 0x00) {
-                                // Determine time of day
-                                int minuteOfDay = minutesInPreviousPackets + (i - startValue) * 5;
-                                sampleCal.set(Calendar.HOUR_OF_DAY, minuteOfDay / 60);
-                                sampleCal.set(Calendar.MINUTE, minuteOfDay % 60);
-                                sampleCal.set(Calendar.SECOND, 0);
-                                LOG.info("Value {} is {} bpm, time of day is {}", i, value[i] & 0xff, sampleCal.getTime());
-                                // Build sample object and save in database
-                                try (DBHandler db = GBApplication.acquireDB()) {
-                                    ColmiHeartRateSampleProvider sampleProvider = new ColmiHeartRateSampleProvider(getDevice(), db.getDaoSession());
-                                    Long userId = DBHelper.getUser(db.getDaoSession()).getId();
-                                    Long deviceId = DBHelper.getDevice(getDevice(), db.getDaoSession()).getId();
-                                    ColmiHeartRateSample gbSample = new ColmiHeartRateSample();
-                                    gbSample.setDeviceId(deviceId);
-                                    gbSample.setUserId(userId);
-                                    gbSample.setTimestamp(sampleCal.getTimeInMillis());
-                                    gbSample.setHeartRate(value[i] & 0xff);
-                                    sampleProvider.addSample(gbSample);
-                                } catch (Exception e) {
-                                    LOG.error("Error acquiring database for recording heart rate samples", e);
-                                }
+                        for (ColmiR0xHeartRatePacket.HeartRateSample sample : ColmiR0xHeartRatePacket.decodeSamples(value)) {
+                            int minuteOfDay = sample.getMinuteOfDay();
+                            sampleCal.set(Calendar.HOUR_OF_DAY, minuteOfDay / 60);
+                            sampleCal.set(Calendar.MINUTE, minuteOfDay % 60);
+                            sampleCal.set(Calendar.SECOND, 0);
+                            LOG.info("Value at {} is {} bpm, time of day is {}", minuteOfDay, sample.getHeartRate(), sampleCal.getTime());
+                            // Build sample object and save in database
+                            try (DBHandler db = GBApplication.acquireDB()) {
+                                ColmiHeartRateSampleProvider sampleProvider = new ColmiHeartRateSampleProvider(getDevice(), db.getDaoSession());
+                                Long userId = DBHelper.getUser(db.getDaoSession()).getId();
+                                Long deviceId = DBHelper.getDevice(getDevice(), db.getDaoSession()).getId();
+                                ColmiHeartRateSample gbSample = new ColmiHeartRateSample();
+                                gbSample.setDeviceId(deviceId);
+                                gbSample.setUserId(userId);
+                                gbSample.setTimestamp(sampleCal.getTimeInMillis());
+                                gbSample.setHeartRate(sample.getHeartRate());
+                                sampleProvider.addSample(gbSample);
+                            } catch (Exception e) {
+                                LOG.error("Error acquiring database for recording heart rate samples", e);
                             }
                         }
                         if (hrPacketNr == packetsTotalNr - 1) {
@@ -286,16 +288,30 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                     }
                     break;
                 case ColmiR0xConstants.CMD_SYNC_ACTIVITY:
-                    ColmiR0xPacketHandler.historicalActivity(getDevice(), getContext(), value);
-                    if (!getDevice().isBusy()) {
-                        if (daysAgo < 7) {
-                            daysAgo++;
-                            fetchHistoryActivity();
-                        } else {
-                            daysAgo = 0;
-                            fetchHistoryHR();
-                        }
+                    if (supportsTodayActivitySummary()
+                            && daysAgo == 0
+                            && ColmiR0xActivityPacket.isEmpty(value)) {
+                        LOG.info("Activity history is empty for today, requesting today's activity summary");
+                        fetchTodayActivitySummary();
+                        break;
                     }
+                    if (ColmiR0xActivityPacket.isHeader(value)) {
+                        activityCalorieNewProtocol = ColmiR0xActivityPacket.usesNewCalorieProtocol(value);
+                    }
+                    ColmiR0xPacketHandler.historicalActivity(getDevice(), getContext(), value, activityCalorieNewProtocol);
+                    if (!getDevice().isBusy()) {
+                        continueActivityHistory();
+                    }
+                    break;
+                case ColmiR0xConstants.CMD_SYNC_TODAY_ACTIVITY:
+                    if (!awaitingTodayActivitySummary) {
+                        LOG.info("Ignoring unsolicited today activity summary: {}", StringUtils.bytesToHex(value));
+                        break;
+                    }
+                    awaitingTodayActivitySummary = false;
+                    backgroundTasksHandler.removeCallbacks(todayActivitySummaryTimeout);
+                    ColmiR0xPacketHandler.historicalTodayActivity(getDevice(), value, syncingDay);
+                    continueActivityHistory();
                     break;
                 case ColmiR0xConstants.CMD_SYNC_HRV:
                     getDevice().setBusyTask(getContext().getString(R.string.busy_task_fetch_hrv_data));
@@ -469,22 +485,26 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
     private void setDateTime() {
         Calendar now = GregorianCalendar.getInstance();
-        byte[] setDateTimePacket = buildPacket(new byte[]{
-                ColmiR0xConstants.CMD_SET_DATE_TIME,
-                Byte.parseByte(String.valueOf(now.get(Calendar.YEAR) % 2000), 16),
-                Byte.parseByte(String.valueOf(now.get(Calendar.MONTH) + 1), 16),
-                Byte.parseByte(String.valueOf(now.get(Calendar.DAY_OF_MONTH)), 16),
-                Byte.parseByte(String.valueOf(now.get(Calendar.HOUR_OF_DAY)), 16),
-                Byte.parseByte(String.valueOf(now.get(Calendar.MINUTE)), 16),
-                Byte.parseByte(String.valueOf(now.get(Calendar.SECOND)), 16)
-        });
+        byte[] setDateTimePacket = ColmiR0xTimePacket.build(now, usesExtendedTimeSyncPacket());
         LOG.info("Set date/time request sent: {}", StringUtils.bytesToHex(setDateTimePacket));
         sendWrite("dateTimeRequest", setDateTimePacket);
     }
 
+    protected boolean supportsTimeSync() {
+        return !readOnly;
+    }
+
+    protected boolean usesExtendedTimeSyncPacket() {
+        return false;
+    }
+
+    protected boolean supportsTodayActivitySummary() {
+        return false;
+    }
+
     @Override
     public void onSetTime() {
-        if (readOnly) {
+        if (!supportsTimeSync()) {
             return;
         }
         setDateTime();
@@ -637,6 +657,9 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     public void onFetchRecordedData(int dataTypes) {
         GB.updateTransferNotification(getContext().getString(R.string.busy_task_fetch_activity_data), "", true, 0, getContext());
         daysAgo = 0;
+        activityCalorieNewProtocol = false;
+        awaitingTodayActivitySummary = false;
+        backgroundTasksHandler.removeCallbacks(todayActivitySummaryTimeout);
         fetchHistoryActivity();
     }
 
@@ -662,16 +685,43 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
         sendWrite("activityHistoryRequest", activityHistoryRequest);
     }
 
+    private void fetchTodayActivitySummary() {
+        awaitingTodayActivitySummary = true;
+        backgroundTasksHandler.removeCallbacks(todayActivitySummaryTimeout);
+        byte[] todayActivityRequest = buildPacket(new byte[]{ColmiR0xConstants.CMD_SYNC_TODAY_ACTIVITY});
+        LOG.info("Fetch today's activity summary request sent: {}", StringUtils.bytesToHex(todayActivityRequest));
+        sendWrite("todayActivitySummaryRequest", todayActivityRequest);
+        backgroundTasksHandler.postDelayed(todayActivitySummaryTimeout, 3000);
+    }
+
+    private void todayActivitySummaryTimedOut() {
+        if (!awaitingTodayActivitySummary) {
+            return;
+        }
+
+        awaitingTodayActivitySummary = false;
+        LOG.warn("No response received for today's activity summary request");
+        continueActivityHistory();
+    }
+
+    private void continueActivityHistory() {
+        if (daysAgo < 7) {
+            daysAgo++;
+            fetchHistoryActivity();
+        } else {
+            daysAgo = 0;
+            fetchHistoryHR();
+        }
+    }
+
     private void fetchHistoryHR() {
         getDevice().setBusyTask(getContext().getString(R.string.busy_task_fetch_hr_data));
         getDevice().sendDeviceUpdateIntent(getContext());
         syncingDay = Calendar.getInstance();
-        if (daysAgo != 0) {
-            syncingDay.add(Calendar.DAY_OF_MONTH, 0 - daysAgo);
-            syncingDay.set(Calendar.HOUR_OF_DAY, 0);
-            syncingDay.set(Calendar.MINUTE, 0);
-            syncingDay.set(Calendar.SECOND, 0);
-        }
+        syncingDay.add(Calendar.DAY_OF_MONTH, 0 - daysAgo);
+        syncingDay.set(Calendar.HOUR_OF_DAY, 0);
+        syncingDay.set(Calendar.MINUTE, 0);
+        syncingDay.set(Calendar.SECOND, 0);
         syncingDay.set(Calendar.MILLISECOND, 0);
         ByteBuffer hrHistoryRequestBB = ByteBuffer.allocate(5);
         hrHistoryRequestBB.order(ByteOrder.LITTLE_ENDIAN);

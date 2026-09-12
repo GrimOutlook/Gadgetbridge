@@ -42,6 +42,21 @@ public class ColmiH59DeviceSupport extends ColmiR0xDeviceSupport {
     }
 
     @Override
+    protected boolean supportsTimeSync() {
+        return true;
+    }
+
+    @Override
+    protected boolean usesExtendedTimeSyncPacket() {
+        return true;
+    }
+
+    @Override
+    protected boolean supportsTodayActivitySummary() {
+        return true;
+    }
+
+    @Override
     public void onNotification(NotificationSpec notificationSpec) {
         if (notificationSpec == null) {
             return;
