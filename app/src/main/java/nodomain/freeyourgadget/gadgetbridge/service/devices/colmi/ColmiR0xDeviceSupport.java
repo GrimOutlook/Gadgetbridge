@@ -30,6 +30,7 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.GregorianCalendar;
@@ -70,6 +71,7 @@ import nodomain.freeyourgadget.gadgetbridge.util.StringUtils;
 
 public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     private static final Logger LOG = LoggerFactory.getLogger(ColmiR0xDeviceSupport.class);
+    private static final String H59_RICH_CHANNEL_ACCOUNT = "ludoplus";
     private final Handler backgroundTasksHandler = new Handler(Looper.getMainLooper());
 
     private final DeviceInfoProfile<ColmiR0xDeviceSupport> deviceInfoProfile;
@@ -259,6 +261,7 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                             daysAgo++;
                             fetchHistoryHR();
                         } else {
+                            daysAgo = 0;
                             fetchHistoryStress();
                         }
                     }
@@ -282,9 +285,21 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                     ColmiR0xPacketHandler.hrvSettings(this, value);
                     break;
                 case ColmiR0xConstants.CMD_SYNC_STRESS:
-                    ColmiR0xPacketHandler.historicalStress(getDevice(), getContext(), value);
+                    ColmiR0xPacketHandler.historicalStress(
+                            getDevice(),
+                            getContext(),
+                            value,
+                            daysAgo,
+                            usesH59HistoryPacketLayout()
+                    );
                     if (!getDevice().isBusy()) {
-                        fetchHistorySpo2();
+                        if (fetchMultipleStressHistoryDays() && daysAgo < 6) {
+                            daysAgo++;
+                            fetchHistoryStress();
+                        } else {
+                            daysAgo = 0;
+                            fetchHistorySpo2();
+                        }
                     }
                     break;
                 case ColmiR0xConstants.CMD_SYNC_ACTIVITY:
@@ -315,7 +330,13 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                     break;
                 case ColmiR0xConstants.CMD_SYNC_HRV:
                     getDevice().setBusyTask(getContext().getString(R.string.busy_task_fetch_hrv_data));
-                    ColmiR0xPacketHandler.historicalHRV(getDevice(), getContext(), value, daysAgo);
+                    ColmiR0xPacketHandler.historicalHRV(
+                            getDevice(),
+                            getContext(),
+                            value,
+                            daysAgo,
+                            usesH59HistoryPacketLayout()
+                    );
                     if (!getDevice().isBusy()) {
                         if (daysAgo < 6) {
                             daysAgo++;
@@ -400,10 +421,6 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
                             daysAgo = 0;
                             fetchHistoryHRV();
-
-                            // Signal history sync finished at this point, since older firmwares
-                            // will not send anything back after requesting HRV history
-                            fetchRecordedDataFinished();
                             break;
                         case ColmiR0xConstants.BIG_DATA_TYPE_SPO2:
                             ColmiR0xPacketHandler.historicalSpo2(getDevice(), value);
@@ -499,6 +516,14 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     }
 
     protected boolean supportsTodayActivitySummary() {
+        return false;
+    }
+
+    protected boolean usesH59HistoryPacketLayout() {
+        return false;
+    }
+
+    protected boolean fetchMultipleStressHistoryDays() {
         return false;
     }
 
@@ -750,7 +775,7 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                 new byte[]{(byte) 0xff}
         );
         LOG.info("Fetch historical SpO2 data request sent: {}", StringUtils.bytesToHex(spo2HistoryRequest));
-        sendCommand("spo2HistoryRequest", spo2HistoryRequest);
+        sendRichDataCommand("spo2HistoryRequest", spo2HistoryRequest);
     }
 
     private void fetchHistorySleep() {
@@ -761,7 +786,7 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                 new byte[]{(byte) 0xff, 0x01}
         );
         LOG.info("Fetch historical sleep data request sent: {}", StringUtils.bytesToHex(sleepHistoryRequest));
-        sendCommand("sleepHistoryRequest", sleepHistoryRequest);
+        sendRichDataCommand("sleepHistoryRequest", sleepHistoryRequest);
     }
 
     private void fetchHistoryHRV() {
@@ -787,5 +812,27 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
         buffer.putShort((short) CheckSums.getCRC16ansi(payload));
         buffer.put(payload);
         return buffer.array();
+    }
+
+    private void sendRichDataCommand(String taskName, byte[] command) {
+        TransactionBuilder builder = new TransactionBuilder(taskName);
+        BluetoothGattCharacteristic characteristic = getCharacteristic(ColmiR0xConstants.CHARACTERISTIC_COMMAND);
+        if (characteristic == null) {
+            return;
+        }
+
+        byte[] account = H59_RICH_CHANNEL_ACCOUNT.getBytes(StandardCharsets.UTF_16LE);
+        byte[] loginPayload = ByteBuffer.allocate(5 + account.length)
+                .put(new byte[]{0x01, 0x01, 0x00})
+                .put((byte) 0xff)
+                .put((byte) 0xfe)
+                .put(account)
+                .array();
+        builder.write(characteristic, buildRichDataPacket(ColmiR0xConstants.BIG_DATA_TYPE_LOGIN, loginPayload))
+                .wait(400)
+                .write(characteristic, buildRichDataPacket(ColmiR0xConstants.BIG_DATA_TYPE_INIT, new byte[0]))
+                .wait(400)
+                .write(characteristic, command)
+                .queue(getQueue());
     }
 }

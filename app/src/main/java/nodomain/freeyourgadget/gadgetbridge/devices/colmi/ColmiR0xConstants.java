@@ -76,6 +76,8 @@ public class ColmiR0xConstants {
 
     public static final byte BIG_DATA_TYPE_SLEEP = 0x27;
     public static final byte BIG_DATA_TYPE_SPO2 = 0x2a;
+    public static final byte BIG_DATA_TYPE_INIT = 0x30;
+    public static final byte BIG_DATA_TYPE_LOGIN = 0x4a;
 
     public static final byte SLEEP_TYPE_LIGHT = 0x02;
     public static final byte SLEEP_TYPE_DEEP = 0x03;

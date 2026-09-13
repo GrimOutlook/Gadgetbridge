@@ -32,6 +32,7 @@ import nodomain.freeyourgadget.gadgetbridge.activities.DashboardFragment;
 import nodomain.freeyourgadget.gadgetbridge.database.DBHandler;
 import nodomain.freeyourgadget.gadgetbridge.impl.GBDevice;
 import nodomain.freeyourgadget.gadgetbridge.model.HrvSummarySample;
+import nodomain.freeyourgadget.gadgetbridge.model.HrvValueSample;
 
 public class DashboardHrvWidget extends AbstractGaugeWidget {
     private static final Logger LOG = LoggerFactory.getLogger(DashboardHrvWidget.class);
@@ -58,6 +59,8 @@ public class DashboardHrvWidget extends AbstractGaugeWidget {
         final List<GBDevice> devices = getSupportedDevices(dashboardData);
 
         HrvSummarySample latestSummary = null;
+        long rawValueTotal = 0;
+        int rawValueCount = 0;
 
         try (DBHandler dbHandler = GBApplication.acquireDB()) {
             for (GBDevice dev : devices) {
@@ -66,6 +69,15 @@ public class DashboardHrvWidget extends AbstractGaugeWidget {
 
                 if (!deviceLatestSummaries.isEmpty() && (latestSummary == null || latestSummary.getTimestamp() < deviceLatestSummaries.get(deviceLatestSummaries.size() - 1).getTimestamp())) {
                     latestSummary = deviceLatestSummaries.get(deviceLatestSummaries.size() - 1);
+                }
+
+                if (latestSummary == null) {
+                    final List<? extends HrvValueSample> values = dev.getDeviceCoordinator().getHrvValueSampleProvider(dev, dbHandler.getDaoSession())
+                            .getAllSamples(dashboardData.timeFrom * 1000L, dashboardData.timeTo * 1000L);
+                    for (final HrvValueSample value : values) {
+                        rawValueTotal += value.getValue();
+                        rawValueCount++;
+                    }
                 }
             }
 
@@ -80,6 +92,9 @@ public class DashboardHrvWidget extends AbstractGaugeWidget {
                 hrvData.baselineBalancedUpper = latestSummary.getBaselineBalancedUpper() != null ? latestSummary.getBaselineBalancedUpper() : 0;
 
                 dashboardData.put("hrv", hrvData);
+            } else if (rawValueCount > 0) {
+                hrvData.weeklyAverage = (int) Math.round((double) rawValueTotal / rawValueCount);
+                dashboardData.put("hrv", hrvData);
             }
 
         } catch (final Exception e) {
@@ -93,8 +108,9 @@ public class DashboardHrvWidget extends AbstractGaugeWidget {
         final float[] segments = getSegments();
         final HrvData hrvData = (HrvData) dashboardData.get("hrv");
         final float value = hrvData != null ? calculateGaugeValue(hrvData.weeklyAverage, hrvData.baselineLowUpper, hrvData.baselineBalancedLower, hrvData.baselineBalancedUpper) : -1;
-        final String valueText;
-        valueText = value > 0 ? getString(R.string.hrv_status_unit, hrvData.weeklyAverage) : getString(R.string.stats_empty_value);
+        final String valueText = hrvData != null && hrvData.weeklyAverage > 0
+                ? getString(R.string.hrv_status_unit, hrvData.weeklyAverage)
+                : getString(R.string.stats_empty_value);
         setText(valueText);
         drawSegmentedGauge(
                 colors,

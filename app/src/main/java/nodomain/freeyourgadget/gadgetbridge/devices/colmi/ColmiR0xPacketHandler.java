@@ -325,6 +325,16 @@ public class ColmiR0xPacketHandler {
     }
 
     public static void historicalStress(GBDevice device, Context context, byte[] value) {
+        historicalStress(device, context, value, 0, false);
+    }
+
+    public static void historicalStress(
+            GBDevice device,
+            Context context,
+            byte[] value,
+            int daysAgo,
+            boolean h59Layout
+    ) {
         ArrayList<ColmiStressSample> stressSamples = new ArrayList<>();
         int stressPacketNr = value[1] & 0xff;
         if (stressPacketNr == 0xff) {
@@ -335,26 +345,21 @@ public class ColmiR0xPacketHandler {
             LOG.info("Received initial stress history response");
         } else {
             Calendar sampleCal = Calendar.getInstance();
+            sampleCal.add(Calendar.DAY_OF_MONTH, -daysAgo);
+            sampleCal.set(Calendar.HOUR_OF_DAY, 0);
+            sampleCal.set(Calendar.MINUTE, 0);
             sampleCal.set(Calendar.SECOND, 0);
             sampleCal.set(Calendar.MILLISECOND, 0);
-            int startValue = stressPacketNr == 1 ? 3 : 2;  // packet 1 data starts at byte 3, others at byte 2
-            int minutesInPreviousPackets = 0;
-            if (stressPacketNr > 1) {
-                // 30 is the interval in minutes between values/measurements
-                minutesInPreviousPackets = 12 * 30;  // 12 values in packet 1
-                minutesInPreviousPackets += (stressPacketNr - 2) * 13 * 30;  // 13 values per packet
-            }
-            for (int i = startValue; i < value.length - 1; i++) {
-                if (value[i] != 0x00) {
-                    // Determine time of day
-                    int minuteOfDay = minutesInPreviousPackets + (i - startValue) * 30;
+            for (final ColmiR0xSlotPacket.SlotSample slotSample : ColmiR0xSlotPacket.decode(value, h59Layout)) {
+                int minuteOfDay = slotSample.getSlot() * 30;
+                if (minuteOfDay < 24 * 60) {
                     sampleCal.set(Calendar.HOUR_OF_DAY, minuteOfDay / 60);
                     sampleCal.set(Calendar.MINUTE, minuteOfDay % 60);
-                    LOG.info("Stress level is {} at {}", value[i] & 0xff, sampleCal.getTime());
+                    LOG.info("Stress level is {} at {}", slotSample.getValue(), sampleCal.getTime());
                     // Build sample object and save in database
                     ColmiStressSample gbSample = new ColmiStressSample();
                     gbSample.setTimestamp(sampleCal.getTimeInMillis());
-                    gbSample.setStress(value[i] & 0xff);
+                    gbSample.setStress(slotSample.getValue());
                     stressSamples.add(gbSample);
                 }
             }
@@ -429,115 +434,87 @@ public class ColmiR0xPacketHandler {
     }
 
     public static void historicalSleep(GBDevice gbDevice, Context context, byte[] value) {
-        int packetLength = BLETypeConversions.toUint16(value[2], value[3]);
-        if (packetLength < 2) {
+        final List<ColmiR0xSleepPacket.SleepSession> sleepSessions = ColmiR0xSleepPacket.decode(value);
+        if (sleepSessions.isEmpty()) {
             LOG.info("Received empty sleep data packet: {}", StringUtils.bytesToHex(value));
-        } else {
-            int daysInPacket = value[6];
-            LOG.debug("Received sleep data packet for {} days: {}", daysInPacket, StringUtils.bytesToHex(value));
-            int index = 7;
-            for (int i = 1; i <= daysInPacket; i++) {
-                // Parse sleep session
-                int daysAgo = value[index];
-                index++;
-                int dayBytes = value[index];
-                index++;
-                // sleepStart is received as "minutes after midnight"
-                int sleepStart = BLETypeConversions.toUint16(value[index], value[index + 1]);
-                index += 2;
-                // sleepEnd is received as "minutes after midnight"
-                int sleepEnd = BLETypeConversions.toUint16(value[index], value[index + 1]);
-                index += 2;
-                // Calculate sleep start timestamp
-                LOG.info("Sleep session daysAgo={}, dayBytes={}, sleepStart={}, sleepEnd={}", daysAgo, dayBytes, sleepStart, sleepEnd);
-                Calendar sessionStart = Calendar.getInstance();
-                sessionStart.add(Calendar.DAY_OF_MONTH, 0 - daysAgo);
-                sessionStart.set(Calendar.HOUR_OF_DAY, 0);
-                sessionStart.set(Calendar.MINUTE, 0);
-                sessionStart.set(Calendar.SECOND, 0);
-                sessionStart.set(Calendar.MILLISECOND, 0);
-                if (sleepStart > sleepEnd) {
-                    // Sleep started a day earlier, so before midnight
-                    sessionStart.add(Calendar.MINUTE, sleepStart - 1440);
-                } else {
-                    // Sleep started this day, so after midnight
-                    sessionStart.add(Calendar.MINUTE, sleepStart);
+            return;
+        }
+
+        LOG.debug("Received {} sleep sessions", sleepSessions.size());
+        for (final ColmiR0xSleepPacket.SleepSession sleepSession : sleepSessions) {
+            final Calendar sessionDay = Calendar.getInstance();
+            sessionDay.add(Calendar.DAY_OF_MONTH, -sleepSession.getDaysAgo());
+            sessionDay.set(Calendar.HOUR_OF_DAY, 0);
+            sessionDay.set(Calendar.MINUTE, 0);
+            sessionDay.set(Calendar.SECOND, 0);
+            sessionDay.set(Calendar.MILLISECOND, 0);
+
+            final Calendar sessionStart = (Calendar) sessionDay.clone();
+            if (sleepSession.getSleepStart() > sleepSession.getSleepEnd()) {
+                sessionStart.add(Calendar.MINUTE, sleepSession.getSleepStart() - 1440);
+            } else {
+                sessionStart.add(Calendar.MINUTE, sleepSession.getSleepStart());
+            }
+
+            final Calendar sessionEnd = (Calendar) sessionDay.clone();
+            sessionEnd.add(Calendar.MINUTE, sleepSession.getSleepEnd());
+            LOG.info("Sleep session starts at {} and ends at {}", sessionStart.getTime(), sessionEnd.getTime());
+
+            final ColmiSleepSessionSample sessionSample = new ColmiSleepSessionSample();
+            sessionSample.setTimestamp(sessionStart.getTimeInMillis());
+            sessionSample.setWakeupTime(sessionEnd.getTimeInMillis());
+
+            final List<ColmiSleepStageSample> stageSamples = new ArrayList<>();
+            final Calendar sleepStage = (Calendar) sessionStart.clone();
+            for (final ColmiR0xSleepPacket.SleepStage sleepStageData : sleepSession.getStages()) {
+                final ColmiSleepStageSample sample = new ColmiSleepStageSample();
+                sample.setTimestamp(sleepStage.getTimeInMillis());
+                sample.setDuration(sleepStageData.getDuration());
+                sample.setStage(sleepStageData.getStage());
+                LOG.info(
+                        "Sleep stage type={} starts at {} and lasts for {} minutes",
+                        sleepStageData.getStage(),
+                        sleepStage.getTime(),
+                        sleepStageData.getDuration()
+                );
+                stageSamples.add(sample);
+                sleepStage.add(Calendar.MINUTE, sleepStageData.getDuration());
+            }
+
+            try (DBHandler handler = GBApplication.acquireDB()) {
+                final DaoSession session = handler.getDaoSession();
+                final Device device = DBHelper.getDevice(gbDevice, session);
+                final User user = DBHelper.getUser(session);
+
+                final ColmiSleepSessionSampleProvider sessionProvider = new ColmiSleepSessionSampleProvider(gbDevice, session);
+                sessionSample.setDevice(device);
+                sessionSample.setUser(user);
+                sessionProvider.addSample(sessionSample);
+
+                final ColmiSleepStageSampleProvider stageProvider = new ColmiSleepStageSampleProvider(gbDevice, session);
+                for (final ColmiSleepStageSample sample : stageSamples) {
+                    sample.setDevice(device);
+                    sample.setUser(user);
                 }
-                // Calculate sleep end timestamp
-                Calendar sessionEnd = Calendar.getInstance();
-                sessionEnd.add(Calendar.DAY_OF_MONTH, 0 - daysAgo);
-                sessionEnd.set(Calendar.HOUR_OF_DAY, 0);
-                sessionEnd.set(Calendar.MINUTE, sleepEnd);
-                sessionEnd.set(Calendar.SECOND, 0);
-                sessionEnd.set(Calendar.MILLISECOND, 0);
-                LOG.info("Sleep session starts at {} and ends at {}", sessionStart.getTime(), sessionEnd.getTime());
-                // Build sample object to persist
-                final ColmiSleepSessionSample sessionSample = new ColmiSleepSessionSample();
-                sessionSample.setTimestamp(sessionStart.getTimeInMillis());
-                sessionSample.setWakeupTime(sessionEnd.getTimeInMillis());
-                // Handle sleep stages
-                final List<ColmiSleepStageSample> stageSamples = new ArrayList<>();
-                Calendar sleepStage = (Calendar) sessionStart.clone();
-                for (int j = 4; j < dayBytes; j += 2) {
-                    int sleepMinutes = value[index + 1];
-                    final ColmiSleepStageSample sample = new ColmiSleepStageSample();
-                    sample.setTimestamp(sleepStage.getTimeInMillis());
-                    sample.setDuration(value[index + 1]);
-                    sample.setStage(value[index]);
-                    if (sleepMinutes > 0) {
-                        LOG.info("Sleep stage type={} starts at {} and lasts for {} minutes", value[index], sleepStage.getTime(), sleepMinutes);
-                        if (sleepStage.getTimeInMillis() + sleepMinutes * 60 * 1000 > sessionEnd.getTimeInMillis()) {
-                            LOG.warn("Warning: sleep stage exceeds end of sleep session, received data may be corrupt");
-                        }
-                        stageSamples.add(sample);
-                        sleepStage.add(Calendar.MINUTE, sleepMinutes);
-                    } else {
-                        LOG.info("Ignoring sleep stage type={} starts at {} and lasts for {} minutes", value[index], sleepStage.getTime(), sleepMinutes);
-                    }
-                    // Prepare for next sample
-                    index += 2;
-                }
-                // Persist sleep session
-                try (DBHandler handler = GBApplication.acquireDB()) {
-                    final DaoSession session = handler.getDaoSession();
-
-                    final Device device = DBHelper.getDevice(gbDevice, session);
-                    final User user = DBHelper.getUser(session);
-
-                    final ColmiSleepSessionSampleProvider sampleProvider = new ColmiSleepSessionSampleProvider(gbDevice, session);
-
-                    sessionSample.setDevice(device);
-                    sessionSample.setUser(user);
-
-                    LOG.debug("Will persist 1 sleep session sample from {} to {}", sessionSample.getTimestamp(), sessionSample.getWakeupTime());
-                    sampleProvider.addSample(sessionSample);
-                } catch (final Exception e) {
-                    GB.toast(context, "Error saving sleep session sample", Toast.LENGTH_LONG, GB.ERROR, e);
-                }
-                // Persist sleep stages
-                try (DBHandler handler = GBApplication.acquireDB()) {
-                    final DaoSession session = handler.getDaoSession();
-
-                    final Device device = DBHelper.getDevice(gbDevice, session);
-                    final User user = DBHelper.getUser(session);
-
-                    final ColmiSleepStageSampleProvider sampleProvider = new ColmiSleepStageSampleProvider(gbDevice, session);
-
-                    for (final ColmiSleepStageSample sample : stageSamples) {
-                        sample.setDevice(device);
-                        sample.setUser(user);
-                    }
-
-                    LOG.debug("Will persist {} sleep stage samples", stageSamples.size());
-                    sampleProvider.addSamples(stageSamples);
-                } catch (final Exception e) {
-                    GB.toast(context, "Error saving sleep stage samples", Toast.LENGTH_LONG, GB.ERROR, e);
-                }
+                stageProvider.addSamples(stageSamples);
+                LOG.debug("Persisted sleep session with {} stages", stageSamples.size());
+            } catch (final Exception e) {
+                GB.toast(context, "Error saving sleep samples", Toast.LENGTH_LONG, GB.ERROR, e);
             }
         }
     }
 
     public static void historicalHRV(GBDevice device, Context context, byte[] value, int daysAgo) {
+        historicalHRV(device, context, value, daysAgo, false);
+    }
+
+    public static void historicalHRV(
+            GBDevice device,
+            Context context,
+            byte[] value,
+            int daysAgo,
+            boolean h59Layout
+    ) {
         LOG.info("Received HRV history sync packet: {}", StringUtils.bytesToHex(value));
         int hrvPacketNr = value[1] & 0xff;
         if (hrvPacketNr == 0xff) {
@@ -557,19 +534,12 @@ public class ColmiR0xPacketHandler {
             }
             sampleCal.set(Calendar.SECOND, 0);
             sampleCal.set(Calendar.MILLISECOND, 0);
-            int startValue = hrvPacketNr == 1 ? 3 : 2;  // packet 1 contains something in byte 2
-            int minutesInPreviousPackets = 0;
-            if (hrvPacketNr > 1) {
-                minutesInPreviousPackets = 12 * 30;  // packet 1
-                minutesInPreviousPackets += (hrvPacketNr - 2) * 13 * 30;
-            }
-            for (int i = startValue; i < value.length - 1; i++) {
-                if (value[i] != 0x00) {
-                    // Determine time of day
-                    int minuteOfDay = minutesInPreviousPackets + (i - startValue) * 30;
+            for (final ColmiR0xSlotPacket.SlotSample slotSample : ColmiR0xSlotPacket.decode(value, h59Layout)) {
+                int minuteOfDay = slotSample.getSlot() * 30;
+                if (minuteOfDay < 24 * 60) {
                     sampleCal.set(Calendar.HOUR_OF_DAY, minuteOfDay / 60);
                     sampleCal.set(Calendar.MINUTE, minuteOfDay % 60);
-                    LOG.info("Value {} is {} ms, time of day is {}", i, value[i] & 0xff, sampleCal.getTime());
+                    LOG.info("Value {} is {} ms, time of day is {}", slotSample.getSlot(), slotSample.getValue(), sampleCal.getTime());
                     // Build sample object and save in database
                     try (DBHandler db = GBApplication.acquireDB()) {
                         ColmiHrvValueSampleProvider sampleProvider = new ColmiHrvValueSampleProvider(device, db.getDaoSession());
@@ -579,7 +549,7 @@ public class ColmiR0xPacketHandler {
                         gbSample.setDeviceId(deviceId);
                         gbSample.setUserId(userId);
                         gbSample.setTimestamp(sampleCal.getTimeInMillis());
-                        gbSample.setValue(value[i] & 0xff);
+                        gbSample.setValue(slotSample.getValue());
                         sampleProvider.addSample(gbSample);
                     } catch (Exception e) {
                         LOG.error("Error acquiring database for recording HRV samples", e);

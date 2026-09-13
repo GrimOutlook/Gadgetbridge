@@ -57,6 +57,16 @@ public class ColmiH59DeviceSupport extends ColmiR0xDeviceSupport {
     }
 
     @Override
+    protected boolean usesH59HistoryPacketLayout() {
+        return true;
+    }
+
+    @Override
+    protected boolean fetchMultipleStressHistoryDays() {
+        return true;
+    }
+
+    @Override
     public void onNotification(NotificationSpec notificationSpec) {
         if (notificationSpec == null) {
             return;
