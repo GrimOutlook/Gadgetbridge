@@ -61,6 +61,11 @@ public class ColmiH59Coordinator extends AbstractColmiR0xCoordinator {
     }
 
     @Override
+    public boolean supportsActiveCalories() {
+        return true;
+    }
+
+    @Override
     public boolean supportsManualHeartRateMeasurement(GBDevice device) {
         return false;
     }
