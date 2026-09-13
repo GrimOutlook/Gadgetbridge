@@ -83,6 +83,7 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     private Calendar syncingDay;
     private boolean activityCalorieNewProtocol;
     private boolean awaitingTodayActivitySummary;
+    private volatile boolean historySyncActive;
     private final Runnable todayActivitySummaryTimeout = this::todayActivitySummaryTimedOut;
 
     private int bigDataPacketSize;
@@ -113,6 +114,7 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
     @Override
     public void dispose() {
+        historySyncActive = false;
         backgroundTasksHandler.removeCallbacksAndMessages(null);
 
         super.dispose();
@@ -213,6 +215,10 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                     LOG.info("Received user preferences response: {}", StringUtils.bytesToHex(value));
                     break;
                 case ColmiR0xConstants.CMD_SYNC_HEART_RATE:
+                    if (!historySyncActive) {
+                        LOG.debug("Ignoring unsolicited HR history packet");
+                        break;
+                    }
                     LOG.info("Received HR history sync packet: {}", StringUtils.bytesToHex(value));
                     int hrPacketNr = ColmiR0xHeartRatePacket.getPacketNumber(value);
                     if (ColmiR0xHeartRatePacket.isEmpty(value)) {
@@ -285,6 +291,10 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                     ColmiR0xPacketHandler.hrvSettings(this, value);
                     break;
                 case ColmiR0xConstants.CMD_SYNC_STRESS:
+                    if (!historySyncActive) {
+                        LOG.debug("Ignoring unsolicited stress history packet");
+                        break;
+                    }
                     ColmiR0xPacketHandler.historicalStress(
                             getDevice(),
                             getContext(),
@@ -303,6 +313,10 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                     }
                     break;
                 case ColmiR0xConstants.CMD_SYNC_ACTIVITY:
+                    if (!historySyncActive) {
+                        LOG.debug("Ignoring unsolicited activity history packet");
+                        break;
+                    }
                     if (supportsTodayActivitySummary()
                             && daysAgo == 0
                             && ColmiR0xActivityPacket.isEmpty(value)) {
@@ -329,6 +343,10 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
                     continueActivityHistory();
                     break;
                 case ColmiR0xConstants.CMD_SYNC_HRV:
+                    if (!historySyncActive) {
+                        LOG.debug("Ignoring unsolicited HRV history packet");
+                        break;
+                    }
                     getDevice().setBusyTask(getContext().getString(R.string.busy_task_fetch_hrv_data));
                     ColmiR0xPacketHandler.historicalHRV(
                             getDevice(),
@@ -406,6 +424,10 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
             }
             switch (value[0]) {
                 case ColmiR0xConstants.CMD_BIG_DATA_V2:
+                    if (!historySyncActive) {
+                        LOG.debug("Ignoring unsolicited big-data history packet");
+                        return true;
+                    }
                     int packetLength = BLETypeConversions.toUint16(value[2], value[3]);
                     if (value.length < packetLength + 6) {
                         // If the received packet is smaller than the expected packet size (+ 6 bytes header),
@@ -680,6 +702,11 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
 
     @Override
     public void onFetchRecordedData(int dataTypes) {
+        if (historySyncActive) {
+            LOG.debug("Ignoring duplicate historical data fetch request");
+            return;
+        }
+        historySyncActive = true;
         GB.updateTransferNotification(getContext().getString(R.string.busy_task_fetch_activity_data), "", true, 0, getContext());
         daysAgo = 0;
         activityCalorieNewProtocol = false;
@@ -689,6 +716,7 @@ public class ColmiR0xDeviceSupport extends AbstractBTLEDeviceSupport {
     }
 
     private void fetchRecordedDataFinished() {
+        historySyncActive = false;
         GB.updateTransferNotification(null, "", false, 100, getContext());
         LOG.info("Sync finished!");
         getDevice().unsetBusyTask();

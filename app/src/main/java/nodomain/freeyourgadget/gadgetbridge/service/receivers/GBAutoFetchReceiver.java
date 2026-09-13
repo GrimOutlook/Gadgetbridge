@@ -37,6 +37,11 @@ public class GBAutoFetchReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(final Context context, final Intent intent) {
+        if (!GBApplication.getPrefs().getBoolean("auto_fetch_enabled", false)) {
+            LOG.debug("Ignoring auto fetch because it is disabled");
+            return;
+        }
+
         synchronized (this) {
             final Date now = new Date();
             final long timeSinceLast = now.getTime() - lastSync.getTime();
